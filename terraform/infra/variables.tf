@@ -37,12 +37,6 @@ variable "config_json" {
   type        = string
 }
 
-variable "enable_apis" {
-  description = "Automatically enable required APIs (requires that cloudresourcemanager.googleapis.com and serviceusage.googleapis.com are already enabled)"
-  default     = true
-  type        = bool
-}
-
 variable "create_buckets" {
   description = "Creates all the unscanned, clean, and quarantined buckets defined in the config. "
   default     = true
@@ -53,4 +47,20 @@ variable "uniform_bucket_level_access" {
   description = "When creating cloud storage buckets, the parameter uniform_bucket_level_access is set to this value"
   default     = true
   type        = bool
+}
+
+variable "bciers_service_account" {
+  description = "The service account email of the BCIERS terraform-bucket-provision service account"
+  type        = string
+}
+
+variable "iam_storage_role_template_id" {
+  type        = string
+  description = "ID for a custom IAM role template we manually created in GCP for Storage Viewers"
+  default     = "casStorageViewer"
+}
+
+variable "openshift_namespace" {
+  type        = string
+  description = "The OCP project namespace"
 }
