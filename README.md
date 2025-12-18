@@ -40,11 +40,11 @@ We used some slightly modified terraform files and configs, but the basics are s
     - Service Usage
     - Cloud Resource Manager
 1. If you haven't already, create a storage bucket for the terraform state. Note, BCIERS `dev`/`test`/`prod` projects have a bucket already created for this purpose.
-1. Enable requried APIs for the project. Enable the Artifact Registry, Cloud Build, Resource Manager, Cloud Scheduler, Eventarc, Logging, Monitoring, Pub/Sub, Cloud Run, and Service Usage APIs. If you're already logged in to the proper project, [this link will enable the proper APIs](https://console.cloud.google.com/flows/enableapi?apiid=artifactregistry.googleapis.com,cloudbuild.googleapis.com,cloudresourcemanager.googleapis.com,cloudscheduler.googleapis.com,eventarc.googleapis.com,logging.googleapis.com,monitoring.googleapis.com,pubsub.googleapis.com,run.googleapis.com,serviceusage.googleapis.com)
+1. Enable required APIs for the project. Enable the Artifact Registry, Cloud Build, Resource Manager, Cloud Scheduler, Eventarc, Logging, Monitoring, Pub/Sub, Cloud Run, and Service Usage APIs. If you're already logged in to the proper project, [this link will enable the proper APIs](https://console.cloud.google.com/flows/enableapi?apiid=artifactregistry.googleapis.com,cloudbuild.googleapis.com,cloudresourcemanager.googleapis.com,cloudscheduler.googleapis.com,eventarc.googleapis.com,logging.googleapis.com,monitoring.googleapis.com,pubsub.googleapis.com,run.googleapis.com,serviceusage.googleapis.com)
 1. Activate the Google Cloud Shell.
 1. The rest of the directions for this deployment will be in the cloud shell.
-1. Clone this repository into your shell (`git clone https://github.com/bcgov/cas-pipeline.git`).
-1. Navigate to the directory where you cloned the project, then to `/gcloud/malware-scanning`
+1. Clone this repository into your shell (`git clone https://github.com/bcgov/cas-clamav-scanner.git`).
+1. Navigate to the directory where you cloned the project.
 1. Run `chmod 775 ./cloudrun-malware-scanner/updateCvdMirror.sh ./cloudrun-malware-scanner/bootstrap.sh` to ensure the mirror update script executable. This is run as part of the Terraform resource `null_resource.populate_cvd_mirror`.
 1. In Cloud Shell, set common shell variables including region and location. Our projects use `northamerica-northeast1` (Montreal) for our storage regions/locations:
 
@@ -68,7 +68,7 @@ We used some slightly modified terraform files and configs, but the basics are s
     > - `${BUCKET_ROOT}-cvd-mirror`
 
 1. Initialize the gcloud CLI environment with your project ID: `gcloud config set project "${PROJECT_ID}"`.
-1. Configure the Terraform variables. This assumes you are in the in the `{repo}/gcloud/malware-scanner` directory. The contents of the config.json configuration file are passed to Terraform by using the TF_VAR_config_json variable, so that Terraform knows which Cloud Storage buckets are to create. The value of this variable is also passed to Cloud Run to configure the service.
+1. Configure the Terraform variables. This assumes you are in the in the `{repo}` directory. The contents of the config.json configuration file are passed to Terraform by using the TF_VAR_config_json variable, so that Terraform knows which Cloud Storage buckets are to create. The value of this variable is also passed to Cloud Run to configure the service.
 
 ```bash
 TF_VAR_project_id=$PROJECT_ID
@@ -78,14 +78,14 @@ TF_VAR_config_json="$(envsubst < config/config.json)"
 TF_VAR_create_buckets=true
 TF_VAR_openshift_namespace=$OPENSHIFT_NAMESPACE
 TF_VAR_bciers_service_account=$BCIERS_SERVICE_ACCOUNT
-export TF_VAR_project_id TF_VAR_region TF_VAR_bucket_location TF_VAR_config_json TF_VAR_create_buckets TF_VAR_bciers_service_account
+export TF_VAR_project_id TF_VAR_region TF_VAR_bucket_location TF_VAR_config_json TF_VAR_create_buckets TF_VAR_openshift_namespace TF_VAR_bciers_service_account
 ```
 
 #### Deployment
 
 ##### Base infrastructure
 
-1. Still within the same Cloud Shell, run the following commands. This assumes you are starting in the in the `{repo}/gcloud/malware-scanner` directory.
+1. Still within the same Cloud Shell, run the following commands. This assumes you are starting in the in the `{repo}` directory.
 
     ```bash
     gcloud services enable \
@@ -151,6 +151,14 @@ export TF_VAR_project_id TF_VAR_region TF_VAR_bucket_location TF_VAR_config_json
     gcs-malware-scanner version 3.2.0
     Using Clam AV version: ClamAV 1.4.1/27479/Fri Dec  6 09:40:14 2024
     ```
+
+### Updating the cloudrun-malware-scanner image
+
+If the upstream repository has updates in the `cloudrun-malware-scanner` directory, you can sync the changes from the upstream repo to this repo. Ensure you are on the latest main release, though depending on the major-minor-patch changes made, you may need to adapt them for this repo. You will then need to:
+
+1. Follow the [preparation](#preparation) directions above to reinitialize your Cloud Shell. If your shell already has this repository cloned, you will need to run `git pull` to get the latest changes from `main`.
+1. You may not need to run the all of the [Base Infrastructure deployment](#base-infrastructure) steps (depending on the changes made upstream), but you will need to run the container image build step. This will be run in the `{repo}/cloudrun-malware-scanner` directory.
+1. Run the steps to [deploy the Cloud Run service](#service-and-triggers) again. This should use the latest built image.
 
 ### Testing and troubleshooting
 
