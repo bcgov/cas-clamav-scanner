@@ -42,3 +42,8 @@ variable "deadline" {
   type        = number
   default     = 300
 }
+
+variable "openshift_namespace" {
+  type        = string
+  description = "The OCP project namespace"
+}

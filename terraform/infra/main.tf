@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+terraform {
+  backend "gcs" {
+    bucket = ""
+    prefix = "terraform/cloudrun-clamav/state/infra"
+  }
+}
 
 provider "google" {
   project = var.project_id
@@ -35,19 +41,11 @@ locals {
   all_buckets              = toset(concat(local.clean_bucket_names, local.unscanned_bucket_names, local.quarantined_bucket_names))
 }
 
-## Enable the APIs
-module "apis" {
-  source     = "./apis"
-  count      = var.enable_apis ? 1 : 0
-  depends_on = [data.google_project.project]
-}
-
 ## Create the service accounts for scanner and builder, and add roles
 #
 resource "google_service_account" "malware_scanner_sa" {
-  account_id   = var.service_name
+  account_id   = "ms-${var.openshift_namespace}"
   display_name = "Service Account for malware scanner cloud run service"
-  depends_on   = [module.apis]
 }
 
 resource "google_project_iam_member" "malware_scanner_iam" {
@@ -58,35 +56,32 @@ resource "google_project_iam_member" "malware_scanner_iam" {
 }
 
 resource "google_service_account" "build_service_account" {
-  account_id   = "${var.service_name}-build"
+  account_id   = "ms-build-${var.openshift_namespace}"
   display_name = "Service Account for malware scanner cloud run service"
-  depends_on   = [module.apis]
 }
 
-resource "google_project_iam_member" "build_iam" {
+resource "google_project_iam_binding" "build_iam" {
   for_each = toset(["roles/storage.objectViewer", "roles/logging.logWriter", "roles/artifactregistry.writer"])
   project  = data.google_project.project.project_id
   role     = each.value
-  member   = "serviceAccount:${google_service_account.build_service_account.email}"
+  members  = ["serviceAccount:${google_service_account.build_service_account.email}"]
 }
 
 resource "google_artifact_registry_repository" "repo" {
   location      = var.region
-  repository_id = var.service_name
+  repository_id = "${var.openshift_namespace}-${var.service_name}"
   description   = "Image registry for Malware Scanner"
   format        = "DOCKER"
-  depends_on    = [module.apis]
 }
 
 ## Allow GCS to publish to pubsub
 #
-data "google_storage_project_service_account" "gcs_account" {
-  depends_on = [module.apis]
-}
-resource "google_project_iam_member" "gcs_sa_pubsub_publish" {
+data "google_storage_project_service_account" "gcs_account" {}
+
+resource "google_project_iam_binding" "gcs_sa_pubsub_publish" {
   project = data.google_project.project.project_id
   role    = "roles/pubsub.publisher"
-  member  = "serviceAccount:${data.google_storage_project_service_account.gcs_account.email_address}"
+  members = ["serviceAccount:${data.google_storage_project_service_account.gcs_account.email_address}"]
 }
 
 ## Create configured scanner buckets if requested.
@@ -97,7 +92,6 @@ module "create_buckets" {
   bucket_location             = var.bucket_location
   uniform_bucket_level_access = var.uniform_bucket_level_access
   bucket_names                = local.all_buckets
-  depends_on                  = [module.apis]
 }
 
 ## Allow service account to admin the scanner buckets.
@@ -110,11 +104,44 @@ data "google_storage_bucket" "scanner-buckets" {
   name       = each.value
   depends_on = [module.create_buckets]
 }
-resource "google_storage_bucket_iam_member" "buckets_sa_iam" {
+resource "google_storage_bucket_iam_binding" "buckets_sa_binding" {
   for_each = local.all_buckets
   bucket   = data.google_storage_bucket.scanner-buckets[each.key].name
   role     = "roles/storage.admin"
-  member   = "serviceAccount:${google_service_account.malware_scanner_sa.email}"
+  members = [
+    "serviceAccount:${google_service_account.malware_scanner_sa.email}",
+  ]
+}
+
+## Grant service accounts created by "BCIERS terraform-bucket-provision" access to the buckets.
+#
+
+data "google_service_account" "bciers_admin_account" {
+  account_id = "sa-${var.bciers_service_account}"
+  project    = data.google_project.project.project_id
+}
+
+resource "google_storage_bucket_iam_binding" "bciers_admin_account_binding" {
+  for_each = local.all_buckets
+  bucket   = data.google_storage_bucket.scanner-buckets[each.key].name
+  role     = "roles/storage.admin"
+  members = [
+    "serviceAccount:${data.google_service_account.bciers_admin_account.email}",
+  ]
+}
+
+data "google_service_account" "bciers_viewer_account" {
+  account_id = "ro-${var.bciers_service_account}"
+  project    = data.google_project.project.project_id
+}
+
+resource "google_storage_bucket_iam_binding" "bciers_viewer_account_binding" {
+  for_each = local.all_buckets
+  bucket   = data.google_storage_bucket.scanner-buckets[each.key].name
+  role     = "projects/${data.google_project.project.project_id}/roles/${var.iam_storage_role_template_id}"
+  members = [
+    "serviceAccount:${data.google_service_account.bciers_viewer_account.email}",
+  ]
 }
 
 ## Create the CVD Mirror bucket and allow service account admin access.
@@ -123,12 +150,13 @@ resource "google_storage_bucket" "cvd_mirror_bucket" {
   name                        = local.cvd_mirror_bucket
   location                    = var.bucket_location
   uniform_bucket_level_access = var.uniform_bucket_level_access
-  depends_on                  = [module.apis]
 }
-resource "google_storage_bucket_iam_member" "cvd_mirror_bucket_sa_iam" {
+resource "google_storage_bucket_iam_binding" "cvd_mirror_bucket_sa_binding" {
   bucket = google_storage_bucket.cvd_mirror_bucket.name
   role   = "roles/storage.admin"
-  member = "serviceAccount:${google_service_account.malware_scanner_sa.email}"
+  members = [
+    "serviceAccount:${google_service_account.malware_scanner_sa.email}",
+  ]
 }
 
 ## Perform an update/initial load of mirror bucket.

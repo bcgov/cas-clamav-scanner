@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+terraform {
+  backend "gcs" {
+    bucket = ""
+    prefix = "terraform/cloudrun-clamav/state/service"
+  }
+}
+
 provider "google" {
   project = var.project_id
   region  = var.region
@@ -30,7 +37,7 @@ locals {
 ## Verify service account exists
 #
 data "google_service_account" "malware_scanner_sa" {
-  account_id = var.service_name
+  account_id = "ms-${var.openshift_namespace}"
   project    = data.google_project.project.project_id
 }
 
@@ -46,7 +53,7 @@ data "google_artifact_registry_docker_image" "scanner-service-image" {
 ## Deploy the Cloud Run Service
 #
 resource "google_cloud_run_v2_service" "malware_scanner" {
-  name     = var.service_name
+  name     = "${var.service_name}-${var.openshift_namespace}"
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
 
@@ -166,7 +173,7 @@ locals {
 }
 
 resource "google_cloud_scheduler_job" "cvd_mirror_update" {
-  name             = "${var.service_name}-cvd-mirror-update"
+  name             = "${var.openshift_namespace}-${var.service_name}-cvd-mirror-update"
   schedule         = "${local.cvd_mirror_update_schedule_minutes} */2 * * *"
   attempt_deadline = "320s"
   region           = var.region
