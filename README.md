@@ -1,3 +1,185 @@
+# CAS ClamAV Malware Scanner
+
+This repository is forked from the Google Cloud Malware Scanner repository, adapted to work for our CAS projects. 
+
+## Terraform deployment to GCP for Malware Scanning
+
+Forked from [the GCP Docker ClamAV malware scanner repo](https://github.com/GoogleCloudPlatform/docker-clamav-malware-scanner/tree/v3.5.0), which is used by [the GCP malware scanning solution documentation](https://cloud.google.com/solutions/automating-malware-scanning-for-documents-uploaded-to-cloud-storage).
+
+For our use case, we use some changes to the terraform files to use GCS buckets for the terraform state. This ensures the state is not stored on an individual cloud console, but rather shared GCS. It's currently best to run the deployment from the GCP Cloud Shell to avoid extra confusion with credentials management.
+
+### Infrastucture description
+
+We used some slightly modified terraform files and configs, but the basics are still the same. This will deploy the following infrastructure:
+
+- A set of service accounts for the malware scanner.
+  - The accounts allow for the malware scanner to move files between buckets.
+- An artifact registry repository for the malware scanner image.
+- A Cloud Run service for the malware scanner (ClamAV).
+- Unscanned Cloud Storage buckets.
+- Clean Cloud Storage buckets.
+- Quarantined Cloud Storage buckets.
+- ClamAV malware definitions mirror bucket.
+  - Cloud Scheduler job to update the ClamAV malware definitions mirror.
+- Eventarc triggers on the unscanned buckets.
+
+### Directions
+
+#### Preparation
+
+1. Log into GCP, and navigate to the cloud project you want to use for the deployment.
+1. Enable requried APIs for the project.
+    - Artifact Registry
+    - Cloud Build
+    - Cloud Run
+    - Cloud Scheduler
+    - Eventarc
+    - Logging
+    - Monitoring
+    - Pub/Sub
+    - Service Usage
+    - Cloud Resource Manager
+1. If you haven't already, create a storage bucket for the terraform state. Note, BCIERS `dev`/`test`/`prod` projects have a bucket already created for this purpose.
+1. Enable requried APIs for the project. Enable the Artifact Registry, Cloud Build, Resource Manager, Cloud Scheduler, Eventarc, Logging, Monitoring, Pub/Sub, Cloud Run, and Service Usage APIs. If you're already logged in to the proper project, [this link will enable the proper APIs](https://console.cloud.google.com/flows/enableapi?apiid=artifactregistry.googleapis.com,cloudbuild.googleapis.com,cloudresourcemanager.googleapis.com,cloudscheduler.googleapis.com,eventarc.googleapis.com,logging.googleapis.com,monitoring.googleapis.com,pubsub.googleapis.com,run.googleapis.com,serviceusage.googleapis.com)
+1. Activate the Google Cloud Shell.
+1. The rest of the directions for this deployment will be in the cloud shell.
+1. Clone this repository into your shell (`git clone https://github.com/bcgov/cas-pipeline.git`).
+1. Navigate to the directory where you cloned the project, then to `/gcloud/malware-scanning`
+1. Run `chmod 775 ./cloudrun-malware-scanner/updateCvdMirror.sh ./cloudrun-malware-scanner/bootstrap.sh` to ensure the mirror update script executable. This is run as part of the Terraform resource `null_resource.populate_cvd_mirror`.
+1. In Cloud Shell, set common shell variables including region and location. Our projects use `northamerica-northeast1` (Montreal) for our storage regions/locations:
+
+    ```bash
+    REGION=northamerica-northeast1
+    LOCATION=northamerica-northeast1
+    PROJECT_ID=<the project id in GCP>
+    OPENSHIFT_NAMESPACE=<the openshift project namespace, e.g. a1b2c3-dev>
+    BUCKET_ROOT=<the base name for the bucket>
+    STATE_BUCKET=<the name of the bucket to store the terraform state in>
+    BCIERS_SERVICE_ACCOUNT=<the base name for the BCIERS service account, see ! below>
+    export BUCKET_ROOT STATE_BUCKET
+    ```
+
+    > **!** The `BCIERS_SERVICE_ACCOUNT` variable is the base name of the service account created by the `terraform-bucket-provision` Helm chart. This is used to grant the service accounts access to the buckets. The pattern for these accounts is `"${openshift_namespace}-${app_name}"`. See the IAM & Admin > Service Accounts section of the GCP cloud console to find this value. *note*: This applies to the BCIERS project, other CAS projects might have multiple projects, and therefore multiple service accounts.
+    >
+    > From `BUCKET_ROOT` variable, 4 buckets will be created:
+    > - `${BUCKET_ROOT}-unscanned`
+    > - `${BUCKET_ROOT}-clean`
+    > - `${BUCKET_ROOT}-quarantined`
+    > - `${BUCKET_ROOT}-cvd-mirror`
+
+1. Initialize the gcloud CLI environment with your project ID: `gcloud config set project "${PROJECT_ID}"`.
+1. Configure the Terraform variables. This assumes you are in the in the `{repo}/gcloud/malware-scanner` directory. The contents of the config.json configuration file are passed to Terraform by using the TF_VAR_config_json variable, so that Terraform knows which Cloud Storage buckets are to create. The value of this variable is also passed to Cloud Run to configure the service.
+
+```bash
+TF_VAR_project_id=$PROJECT_ID
+TF_VAR_region=$REGION
+TF_VAR_bucket_location=$LOCATION
+TF_VAR_config_json="$(envsubst < config/config.json)"
+TF_VAR_create_buckets=true
+TF_VAR_openshift_namespace=$OPENSHIFT_NAMESPACE
+TF_VAR_bciers_service_account=$BCIERS_SERVICE_ACCOUNT
+export TF_VAR_project_id TF_VAR_region TF_VAR_bucket_location TF_VAR_config_json TF_VAR_create_buckets TF_VAR_bciers_service_account
+```
+
+#### Deployment
+
+##### Base infrastructure
+
+1. Still within the same Cloud Shell, run the following commands. This assumes you are starting in the in the `{repo}/gcloud/malware-scanner` directory.
+
+    ```bash
+    gcloud services enable \
+      cloudresourcemanager.googleapis.com \
+      serviceusage.googleapis.com
+    cd terraform/infra
+    terraform init -backend-config="bucket=${STATE_BUCKET}"
+    terraform apply
+    ```
+
+    **Double check any changes you see in the console output.** Respond with `yes` if everything looks good.
+
+    > This Terraform script performs the following tasks:
+    > - Creates the service accounts
+    > - Creates the Artifact Registry
+    > - Creates the Cloud Storage buckets
+    > - Sets the appropriate roles and permissions
+    > - Performs an initial population of the Cloud Storage bucket that contains the mirror of ClamAV malware definitions database
+
+1. Build the container image for the malware scanner service. In the Cloud Shell, run the following commands to launch a Cloud Build job to create the container image for the service:
+
+    ```bash
+    cd ../../cloudrun-malware-scanner
+    gcloud builds submit --region=$TF_VAR_region --config=cloudbuild.yaml \
+        --service-account=projects/$PROJECT_ID/serviceAccounts/ms-build-$OPENSHIFT_NAMESPACE@$PROJECT_ID.iam.gserviceaccount.com \
+        .
+    ```
+
+    Wait for the build to complete.
+
+##### Service and triggers
+
+1. In the Cloud Shell, run the following commands to deploy the Cloud Run service:
+
+    ```bash
+    cd ../terraform/service/
+    terraform init -backend-config="bucket=${STATE_BUCKET}"
+    terraform apply
+    ```
+
+    **Double check any changes you see in the console output.** Respond with `yes` if everything looks good.
+
+    > It can take several minutes for the service to deploy and start. This terraform script performs the following tasks:
+    > - Deploys the Cloud Run service by using the container image that you just built.
+    > - Sets up the Eventarc triggers on the unscanned Cloud Storage buckets. Although your trigger is created immediately, it can take up to two minutes for that trigger to be fully functional.
+    > - Creates the Cloud Scheduler job to update to the ClamAV malware definitions mirror.
+
+    There is a chance that the deployment will fail with the following errors. If so, wait one minute and run `terraform apply` again.
+
+    - `Error: Error creating Trigger: googleapi: Error 400: Invalid resource state for "": The request was invalid: Bucket "unscanned-ggl-cas-storage-dev" was not found. Please verify that the bucket exists.`
+    - `Error: Error creating Trigger: googleapi: Error 400: Invalid resource state for "": Permission denied while using the Eventarc Service Agent. If you recently started to use Eventarc, it may take a few minutes before all necessary permissions are propagated to the Service Agent. Otherwise, verify that it has Eventarc Service Agent role..`
+
+1. Verify that the service is running with the following command:
+
+    ```bash
+    MALWARE_SCANNER_URL="$(terraform output -raw cloud_run_uri)"
+    curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" "${MALWARE_SCANNER_URL}"
+    ```
+
+    This command will output lines similar to:
+
+    ```text
+    gcs-malware-scanner version 3.2.0
+    Using Clam AV version: ClamAV 1.4.1/27479/Fri Dec  6 09:40:14 2024
+    ```
+
+### Testing and troubleshooting
+
+#### Test file scanning
+
+You can follow the directions in the [Google CAC documents](https://cloud.google.com/architecture/automate-malware-scanning-for-documents-uploaded-to-cloud-storage/deployment#test_the_pipeline_by_uploading_files).
+
+#### Troubleshooting
+
+##### EventArc `permission_denied`
+
+If the *EventArc* just has `permission_denied`, check the *pub/sub* topic that's connected to it. There's a chance that certain APIs haven't been enabled. Click on the topic, then click *+ Trigger Cloud Run Function*. It should check that the required APIs are enabled. You can enable these automatically with the link in the [tutorial docs](https://cloud.google.com/architecture/automate-malware-scanning-for-documents-uploaded-to-cloud-storage/deployment#before_you_begin).
+
+See [https://stackoverflow.com/questions/74313620/how-to-give-google-cloud-eventarc-correct-permission-so-it-can-trigger-a-cloud-f](https://stackoverflow.com/questions/74313620/how-to-give-google-cloud-eventarc-correct-permission-so-it-can-trigger-a-cloud-f), for further reference.
+
+You might also get the following error in the same trigger sidebar.
+
+```text
+Service account(s) might not have enough permissions to deploy the function with selected trigger. To mitigate potential errors, you can grant them the following roles:
+
+for service-############@gcp-sa-pubsub.iam.gserviceaccount.com:
+
+roles/iam.serviceAccountTokenCreator on project-id
+```
+
+---
+Original README from source repo:
+---
+
 # Malware Scanner Service
 
 This repository contains the code to build a pipeline that scans objects
